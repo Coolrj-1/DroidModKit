@@ -1,15 +1,18 @@
-"""DroidModKit - a safe, read-only APK inspection starter workbench."""
+"""DroidModKit - read-only APK inspection workbench."""
 from __future__ import annotations
+
 import hashlib
 import json
 import zipfile
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "DroidModKit"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -18,9 +21,51 @@ def sha256_file(path: Path) -> str:
             digest.update(chunk)
     return digest.hexdigest()
 
+
 def inspect_apk(path: Path) -> dict:
+    """Inspect ZIP metadata without extracting or executing APK contents."""
+    path = Path(path)
     if not path.is_file() or path.suffix.lower() != ".apk":
         raise ValueError("Select an existing .apk file.")
+
+    entries = []
+    duplicate_names = []
+    seen = set()
+    with zipfile.ZipFile(path, "r") as archive:
+        bad_member = archive.testzip()
+        if bad_member:
+            raise ValueError(f"Archive integrity check failed at: {bad_member}")
+        for item in archive.infolist():
+            name = item.filename
+            if name in seen and name not in duplicate_names:
+                duplicate_names.append(name)
+            seen.add(name)
+            entries.append({
+                "name": name,
+                "size_bytes": item.file_size,
+                "compressed_size_bytes": item.compress_size,
+                "is_directory": item.is_dir(),
+                "encrypted": bool(item.flag_bits & 0x1),
+                "compression_ratio": round(item.file_size / max(item.compress_size, 1), 2),
+            })
+
+    names = [item["name"] for item in entries]
+    dex_files = sorted(n for n in names if n.startswith("classes") and n.endswith(".dex"))
+    native_libraries = sorted(n for n in names if n.startswith("lib/") and n.endswith(".so"))
+    manifest_present = "AndroidManifest.xml" in names
+    signature_files = sorted(
+        n for n in names
+        if n.upper().startswith("META-INF/") and n.upper().endswith((".RSA", ".DSA", ".EC", ".SF"))
+    )
+    suspicious_paths = sorted(
+        n for n in names
+        if n.startswith(("/", "\\\\")) or ".." in Path(n).parts
+    )
+    high_compression = sorted(
+        item["name"] for item in entries
+        if not item["is_directory"] and item["size_bytes"] > 10 * 1024 * 1024
+        and item["compression_ratio"] > 100
+    )
     report = {
         "tool": APP_NAME,
         "tool_version": APP_VERSION,
@@ -29,43 +74,37 @@ def inspect_apk(path: Path) -> dict:
         "file_path": str(path.resolve()),
         "file_size_bytes": path.stat().st_size,
         "sha256": sha256_file(path),
-        "valid_zip_archive": False,
-        "entry_count": 0,
-        "entries": [],
+        "valid_zip_archive": True,
+        "entry_count": len(entries),
+        "entries": entries,
+        "has_android_manifest": manifest_present,
+        "dex_files": dex_files,
+        "native_libraries": native_libraries,
+        "signature_files": signature_files,
+        "duplicate_entries": duplicate_names,
+        "suspicious_paths": suspicious_paths,
+        "high_compression_entries": high_compression,
+        "encrypted_entries": sorted(item["name"] for item in entries if item["encrypted"]),
+        "file_type_counts": dict(sorted(Counter(
+            Path(item["name"]).suffix.lower() or "[no extension]"
+            for item in entries if not item["is_directory"]
+        ).items())),
         "notes": [
-            "APK files are ZIP containers; this version inventories entries only.",
-            "Binary AndroidManifest.xml decoding is not yet implemented.",
-            "No APK content is executed or modified."
+            "APK contents are inventoried; no files are extracted or executed.",
+            "AndroidManifest.xml is detected but not decoded in this release.",
+            "Signature files are detected by filename; cryptographic signatures are not verified.",
+            "Heuristic flags are indicators for manual review, not proof of malicious behavior.",
         ],
     }
-    with zipfile.ZipFile(path, "r") as archive:
-        bad_member = archive.testzip()
-        if bad_member:
-            raise ValueError(f"Archive integrity check failed at: {bad_member}")
-        entries = [{
-            "name": item.filename,
-            "size_bytes": item.file_size,
-            "compressed_size_bytes": item.compress_size,
-            "is_directory": item.is_dir(),
-        } for item in archive.infolist()]
-    report["valid_zip_archive"] = True
-    report["entries"] = entries
-    report["entry_count"] = len(entries)
-    report["has_android_manifest"] = any(x["name"] == "AndroidManifest.xml" for x in entries)
-    report["native_libraries"] = [
-        x["name"] for x in entries if x["name"].startswith("lib/") and x["name"].endswith(".so")
-    ]
-    report["dex_files"] = [
-        x["name"] for x in entries if x["name"].startswith("classes") and x["name"].endswith(".dex")
-    ]
     return report
+
 
 class DroidModKitApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} {APP_VERSION}")
-        self.geometry("980x650")
-        self.minsize(720, 460)
+        self.geometry("1080x720")
+        self.minsize(760, 500)
         self.report = None
         self.current_path = None
         self.build_ui()
@@ -77,30 +116,80 @@ class DroidModKitApp(tk.Tk):
         header.pack(fill="x")
         ttk.Label(header, text=APP_NAME, font=("Segoe UI", 20, "bold")).pack(side="left")
         ttk.Label(header, text=f"v{APP_VERSION} • Read-only APK inspector").pack(side="right")
+
         actions = ttk.Frame(root)
         actions.pack(fill="x", pady=(14, 8))
         ttk.Button(actions, text="Open APK…", command=self.open_apk).pack(side="left")
         self.export_button = ttk.Button(actions, text="Export JSON report…",
                                         command=self.export_report, state="disabled")
         self.export_button.pack(side="left", padx=8)
+        self.search_var = tk.StringVar()
+        ttk.Label(actions, text="Filter entries:").pack(side="left", padx=(16, 5))
+        search = ttk.Entry(actions, textvariable=self.search_var, width=32)
+        search.pack(side="left")
+        search.bind("<KeyRelease>", lambda _event: self.populate_table())
+
         self.status = tk.StringVar(value="Open an APK you own or are authorized to inspect.")
         ttk.Label(root, textvariable=self.status).pack(anchor="w", pady=(0, 8))
+
         columns = ("name", "size", "compressed", "kind")
         self.table = ttk.Treeview(root, columns=columns, show="headings")
         for key, label, width in [
-            ("name", "Archive path", 560), ("size", "Size (bytes)", 120),
-            ("compressed", "Compressed (bytes)", 140), ("kind", "Type", 100)
+            ("name", "Archive path", 610), ("size", "Size (bytes)", 130),
+            ("compressed", "Compressed (bytes)", 150), ("kind", "Type", 100)
         ]:
             self.table.heading(key, text=label)
             self.table.column(key, width=width, anchor="w")
         self.table.pack(fill="both", expand=True)
-        details = ttk.LabelFrame(root, text="APK details", padding=8)
+
+        details = ttk.LabelFrame(root, text="Inspection summary", padding=8)
         details.pack(fill="x", pady=(10, 0))
-        self.details = tk.Text(details, height=7, wrap="word", state="disabled")
+        self.details = tk.Text(details, height=9, wrap="word", state="disabled")
         self.details.pack(fill="x")
-        ttk.Label(root, text="Safety: inspection only. No execution, signature alteration, "
+        ttk.Label(root, text="Safety: inspection only. No execution, extraction, signature alteration, "
                   "payment bypass, or protection circumvention.",
-                  foreground="#8a4b08", wraplength=900).pack(anchor="w", pady=(10, 0))
+                  foreground="#8a4b08", wraplength=1000).pack(anchor="w", pady=(10, 0))
+
+    def populate_table(self):
+        for item in self.table.get_children():
+            self.table.delete(item)
+        if not self.report:
+            return
+        query = self.search_var.get().strip().casefold()
+        for entry in self.report["entries"]:
+            if query and query not in entry["name"].casefold():
+                continue
+            kind = "Folder" if entry["is_directory"] else Path(entry["name"]).suffix or "File"
+            self.table.insert("", "end", values=(entry["name"], entry["size_bytes"],
+                                                 entry["compressed_size_bytes"], kind))
+
+    def show_summary(self):
+        report = self.report
+        flags = []
+        for key, label in [
+            ("duplicate_entries", "Duplicate archive paths"),
+            ("suspicious_paths", "Suspicious paths"),
+            ("high_compression_entries", "High compression-ratio files"),
+            ("encrypted_entries", "Encrypted entries"),
+        ]:
+            values = report[key]
+            flags.append(f"{label}: {len(values)}")
+        summary = [
+            f"File: {report['file']}",
+            f"Size: {report['file_size_bytes']:,} bytes",
+            f"SHA-256: {report['sha256']}",
+            f"Entries: {report['entry_count']}",
+            f"AndroidManifest.xml present: {'Yes' if report['has_android_manifest'] else 'No'}",
+            f"DEX files ({len(report['dex_files'])}): {', '.join(report['dex_files']) or 'None'}",
+            f"Native libraries ({len(report['native_libraries'])}): {', '.join(report['native_libraries']) or 'None'}",
+            f"Signature-related files: {len(report['signature_files'])} (not cryptographically verified)",
+            "Review indicators: " + " • ".join(flags),
+            "Manifest decoding and signature verification are not implemented.",
+        ]
+        self.details.configure(state="normal")
+        self.details.delete("1.0", "end")
+        self.details.insert("1.0", "\n".join(summary))
+        self.details.configure(state="disabled")
 
     def open_apk(self):
         selected = filedialog.askopenfilename(
@@ -110,28 +199,14 @@ class DroidModKitApp(tk.Tk):
             return
         path = Path(selected)
         try:
-            report = inspect_apk(path)
+            self.report = inspect_apk(path)
         except (OSError, zipfile.BadZipFile, ValueError) as exc:
             messagebox.showerror("Could not inspect APK", str(exc))
             return
-        self.current_path, self.report = path, report
-        for item in self.table.get_children():
-            self.table.delete(item)
-        for entry in report["entries"]:
-            kind = "Folder" if entry["is_directory"] else Path(entry["name"]).suffix or "File"
-            self.table.insert("", "end", values=(entry["name"], entry["size_bytes"],
-                                                 entry["compressed_size_bytes"], kind))
-        summary = [
-            f"File: {report['file']}", f"Size: {report['file_size_bytes']:,} bytes",
-            f"SHA-256: {report['sha256']}", f"Entries: {report['entry_count']}",
-            f"AndroidManifest.xml present: {'Yes' if report.get('has_android_manifest') else 'No'}",
-            f"DEX files: {', '.join(report.get('dex_files', [])) or 'None found'}",
-            f"Native libraries: {', '.join(report.get('native_libraries', [])) or 'None found'}",
-        ]
-        self.details.configure(state="normal")
-        self.details.delete("1.0", "end")
-        self.details.insert("1.0", "\n".join(summary))
-        self.details.configure(state="disabled")
+        self.current_path = path
+        self.search_var.set("")
+        self.populate_table()
+        self.show_summary()
         self.export_button.configure(state="normal")
         self.status.set(f"Inspected {path.name} successfully.")
 
@@ -151,6 +226,7 @@ class DroidModKitApp(tk.Tk):
             messagebox.showerror("Could not save report", str(exc))
             return
         self.status.set(f"Report saved to {destination}")
+
 
 if __name__ == "__main__":
     DroidModKitApp().mainloop()
