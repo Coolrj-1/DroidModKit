@@ -59,7 +59,7 @@ def inspect_apk(path: Path) -> dict:
     )
     suspicious_paths = sorted(
         n for n in names
-        if n.startswith(("/", "\\\\")) or ".." in Path(n).parts
+        if n.startswith(("/", "\\")) or ".." in Path(n).parts
     )
     high_compression = sorted(
         item["name"] for item in entries
