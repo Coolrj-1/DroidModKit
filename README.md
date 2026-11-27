@@ -1,19 +1,22 @@
 # DroidModKit
 
-**An open-source Android APK inspection workbench for developers.**
+**A read-only Android APK inspection workbench for developers.**
 
-DroidModKit is an early, read-only desktop starter project for examining APK package structure. The first release can open an APK, validate its ZIP archive, list packaged files, identify DEX files and native libraries, calculate SHA-256, and export a JSON report.
+DroidModKit opens APK files as ZIP archives and creates a structured inventory without installing, executing, extracting, or modifying the application.
 
-> Use only with applications you own or are authorized to inspect. DroidModKit does not execute APKs, remove licensing, bypass payment checks, or defeat app protections.
+> Use only with applications you own or are authorized to inspect. DroidModKit does not remove licensing, bypass payment checks, or defeat app protections.
 
-## Current features (v0.1.0)
+## Current features (v0.2.0)
 
-- Desktop GUI built with Python's Tkinter (no third-party runtime dependencies).
+- Desktop GUI built with Python's Tkinter (standard library).
 - APK ZIP integrity check and archive inventory.
-- File sizes and compressed sizes.
-- Detection of `AndroidManifest.xml`, `classes*.dex`, and `lib/**/*.so`.
+- File sizes, compressed sizes, and extension counts.
 - SHA-256 hash of the APK.
+- Detection of AndroidManifest.xml, DEX files, native libraries, and signature-related files.
+- Review indicators for duplicate archive paths, suspicious paths, encrypted entries, and unusually high compression ratios.
+- Live archive-path filtering.
 - Exportable JSON inspection report.
+- Automated unit tests for core inspection behavior.
 
 ## Requirements
 
@@ -32,20 +35,29 @@ On Windows:
 py -3 app.py
 ```
 
-Click **Open APK…**, choose an APK you are authorized to inspect, then click **Export JSON report…** to save the inventory.
+Choose **Open APK…**, select an APK you are authorized to inspect, and use **Export JSON report…** to save the results.
 
-## Limitations
+## Run tests
 
-This is a starter inspector, not a full APK decompiler or editor. Android's compiled `AndroidManifest.xml` is usually binary XML; this version detects its presence but does not decode it. It does not extract files, modify APKs, rebuild packages, or sign APKs.
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Important limitations
+
+- Android's compiled binary AndroidManifest.xml is detected but not decoded.
+- Signature-related files are identified by filename; cryptographic signature verification is not performed.
+- Heuristic review indicators are not malware verdicts.
+- The tool does not decompile DEX, decode resources, extract files, rebuild packages, or sign APKs.
 
 ## Roadmap
 
-- [ ] Manifest decoding and readable permission/component summary
+- [ ] Binary AndroidManifest.xml decoding and readable permission/component summary
 - [ ] Resource and asset browser
 - [ ] Smali and DEX inspection integration
 - [ ] Native library metadata viewer
 - [ ] Optional Apktool integration for authorized workflows
-- [ ] Automated tests and packaged desktop builds
+- [ ] Packaged desktop builds
 
 Contributions are welcome. Please open an issue before large feature changes.
 
